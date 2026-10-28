@@ -247,6 +247,45 @@ separate SSO origin, it only needs the Web origins entry from §4.
 
 ---
 
+## 7b. If nginx will not start at all
+
+Check the logs first — an nginx config error is fatal, so the container
+crash-loops and *every* vhost goes down together (SSO, Vault and Backend all
+stop answering, not just the broken one):
+
+```bash
+docker compose logs nginx | tail -30
+```
+
+The failure mode worth knowing about:
+
+```
+nginx: [emerg] host not found in upstream "agentgateway-ui" in /etc/nginx/nginx.conf:241
+```
+
+A `proxy_pass` written with a **literal** hostname is resolved when nginx parses
+its config. If that container is not running at that moment, nginx refuses to
+start. Every `proxy_pass` in these configs therefore uses the
+`set $upstream … ; proxy_pass http://$upstream …;` form plus the `resolver
+127.0.0.11` line, which defers the lookup to request time — a missing upstream
+then degrades to a 502 on that path alone.
+
+`../ATK/config/nginx.conf` still has seven literal upstreams (the `/api/config`,
+`/api/runtime`, `/api/costs/*`, `/api/cel`, `/api/logs` Agent Gateway overrides).
+It survives on a single host because `depends_on` starts those containers first,
+but it will take the whole proxy down if the Agent Gateway images fail to pull
+or crash on boot.
+
+Other quick checks:
+
+```bash
+docker compose exec nginx nginx -t          # syntax + upstream resolution
+docker compose ps                            # is agentgateway-ui actually up?
+curl -ski https://localhost/healthz -H "Host: backend-atkdev.familydollar.com"
+```
+
+---
+
 ## 8. Known rough edges carried over from `../ATK`
 
 - `main.py` hard-codes `allow_origins=["*"]`; the `CORS_ORIGINS` /

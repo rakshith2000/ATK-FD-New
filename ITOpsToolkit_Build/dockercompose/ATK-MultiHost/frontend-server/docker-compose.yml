@@ -39,8 +39,11 @@ services:
       - ./config/config.json:/app/public/config.json:ro
       - ./config/public.pem:/app/public.pem:ro
       - ./config/license.txt:/app/public/license.txt:ro
-      - ./config/vite.config.ts:/app/vite.config.ts:ro
       - frontend_dist:/shared
+      # NOTE: vite.config.ts is deliberately NOT mounted. The image ships the
+      # build config that matches its own source tree; overriding it with a
+      # repo snapshot risks breaking the build for no gain (the only delta is
+      # a `preview` block, which `npm run build` never reads).
     networks:
       - atk-network
     restart: "no"

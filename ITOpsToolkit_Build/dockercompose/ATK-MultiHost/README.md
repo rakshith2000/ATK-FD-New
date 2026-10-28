@@ -82,8 +82,31 @@ commented-out same-origin proxy block; see §7.
 | `core-server/config/.vault_env` | `VAULT_URL=http://vault:8200` (container-to-container, no TLS hop) |
 | `frontend-server/config/app-config.json` | `backend.api.baseUrl` → `https://backend-atkdev…/api`; `auth.keycloak.url` → `https://sso-atkdev…/auth`; `clientId` → `aiot-frontend`; `externalLinks.*` → `https://backend-atkdev…/grafana`; `iframes.agentGateway` → `https://backend-atkdev…/ui/`; entraId redirect URIs → frontend DNS |
 | `frontend-server/config/config.json` | Same substitutions for the legacy endpoint map, incl. `iac_socket_url` → `wss://backend-atkdev…` |
-| `frontend-server/config/nginx.conf` | New: static SPA vhost with SPA fallback, asset caching, `no-store` on `app-config.json` |
-| `*/config/vite.config.ts` | `preview.allowedHosts` updated (only affects `vite preview`, not the production build) |
+| `frontend-server/config/nginx.conf` | New: static SPA vhost, SPA fallback, split asset caching (see below), `no-store` on `app-config.json` / `config.json` / `license.txt`, `text/javascript` in `gzip_types` |
+| `core-server/config/vite.config.ts` | `preview.allowedHosts` updated. Inert — mounted into the *backend* container by the original compose; kept only for parity |
+
+### Asset caching on the frontend host
+
+`dist/assets/` holds two different kinds of file and they must not share a
+caching policy:
+
+| Path | Origin | Filenames | Policy |
+|---|---|---|---|
+| `assets/js/`, `assets/css/`, `assets/img/`, `assets/fonts/` | vite `rolldownOptions.output` | content-hashed | `1y, immutable` |
+| `assets/knowledge-ai/`, `assets/module-icons/`, `assets/shared/` | copied verbatim from `public/` | **stable** | `1h, must-revalidate` |
+
+Marking the second group `immutable` would mean a replaced category or module
+icon never reaches a browser that has already loaded the old one — `immutable`
+suppresses revalidation even on a manual reload.
+
+### The frontend builder does not get `vite.config.ts`
+
+The `frontend_2.3.4` image already contains the build config matching its own
+source tree. Mounting a repo snapshot over `/app/vite.config.ts` would risk
+breaking the build whenever the image moves ahead of the checkout, and buys
+nothing: the only difference is a `preview` block, which `npm run build` never
+reads. The original `../ATK` compose mounts that file into the **backend**
+container instead — almost certainly a copy/paste slip, harmless there.
 
 **No application source code was modified.** Everything above is config.
 

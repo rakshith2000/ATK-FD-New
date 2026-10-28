@@ -1,0 +1,264 @@
+# ATK — Two-VM Docker Compose Deployment
+
+Split of the single-host `../ATK` stack across two Linux VMs, with one DNS
+record per component instead of one hostname using path routing (`/api`,
+`/auth`, …).
+
+---
+
+## 1. Topology
+
+| DNS record | IP | VM | Served by |
+|---|---|---|---|
+| `sso-atkdev.familydollar.com` | 10.106.6.15 | core | Keycloak (`/auth`) |
+| `vault-atkdev.familydollar.com` | 10.106.6.15 | core | HashiCorp Vault |
+| `backend-atkdev.familydollar.com` | 10.106.6.15 | core | Backend API + Grafana + LiteLLM + Agent Gateway |
+| `autonomousitopstoolkitdev.familydollar.com` | 10.106.6.228 | frontend | React SPA |
+
+```
+                   Browser
+                      │
+      ┌───────────────┴────────────────────────────────┐
+      │                                                │
+      ▼                                                ▼
+ autonomousitopstoolkitdev                   sso-atkdev   ─┐
+ (10.106.6.228)                              vault-atkdev  ├─ (10.106.6.15)
+ ┌──────────────────────┐                    backend-atkdev┘
+ │ nginx :443           │                    ┌─────────────────────────────┐
+ │  └─ static SPA       │                    │ nginx :443 (3 vhosts)       │
+ │ frontend-builder     │                    │  ├─ keycloak:8080           │
+ └──────────────────────┘                    │  ├─ vault:8200              │
+                                             │  └─ backend:8000            │
+                                             │     grafana:3000  /grafana  │
+                                             │     litellm:4000  /litellm  │
+                                             │     agw-ui:19000  /ui       │
+                                             │     agw-engine    /mcp      │
+                                             │ postgres:5432               │
+                                             └─────────────────────────────┘
+```
+
+**Grafana, LiteLLM and Agent Gateway have no DNS record of their own**, so they
+stay as sub-paths of the backend hostname. Both VMs run their own nginx
+container with its own config — nothing is shared between the two hosts.
+
+### Why only 4 records, and what that means
+
+The browser now talks to two origins, so these are cross-origin calls:
+
+- SPA → `https://backend-atkdev.familydollar.com/api` (REST + WebSocket)
+- SPA → `https://sso-atkdev.familydollar.com/auth` (Keycloak JS adapter)
+
+No code change was needed for this: the backend already runs
+`CORSMiddleware(allow_origins=["*"], allow_credentials=True)` and the SPA uses
+bearer tokens (`withCredentials: false`), so preflight succeeds as-is. What
+*does* need attention is Keycloak client configuration — see §4.
+
+If you would rather avoid cross-origin entirely, the frontend nginx has a
+commented-out same-origin proxy block; see §7.
+
+---
+
+## 2. What changed vs. the single-host `../ATK` stack
+
+### Split
+
+| Component | Single host | Core VM (.15) | Frontend VM (.228) |
+|---|---|---|---|
+| postgres, vault, keycloak, litellm, agentgateway ×2, backend, grafana | ✓ | ✓ | — |
+| frontend-builder | ✓ | — | ✓ |
+| nginx | 1 | 1 (3 vhosts) | 1 (1 vhost) |
+| `frontend_dist` volume | shared | removed | local to this VM |
+
+### Config edits
+
+| File | Change |
+|---|---|
+| `core-server/.env` | `DNS_NAME` replaced by `KEYCLOAK_DNS` / `VAULT_DNS` / `BACKEND_DNS` / `FRONTEND_DNS`; added `DB_*`/`PGDB_*` and `GRAFANA_ADMIN_*` (were hard-coded in compose) |
+| `core-server/docker-compose.yml` | `KC_HOSTNAME` → `https://${KEYCLOAK_DNS}/auth`; backend + agentgateway-ui `KEYCLOAK_URL` → `https://${KEYCLOAK_DNS}/auth` (was the shared `integration.autonomousitopstoolkit.com`); `LITELLM_PUBLIC_BASE_URL` / `GF_SERVER_ROOT_URL` → `${BACKEND_DNS}`; backend CORS envs → frontend origin; Grafana embedding allowed; frontend-builder removed; nginx no longer publishes `:8443` |
+| `core-server/config/nginx.conf` | Rewritten: name-based vhosts. `/auth` is now a dedicated vhost proxying the **local** keycloak container (the old config proxied to an external Keycloak); Vault moved from `:8443` to its own vhost on `:443`; backend vhost keeps the original `/api`, `/litellm`, `/grafana`, `/ui`, `/agentgateway`, `/mcp`, `/iac_assist_socket`, `/openapi.json` locations; catch-all vhost returns 444 |
+| `core-server/config/grafana.ini` | `root_url` → backend DNS; admin creds read from env; `allow_embedding`/`cookie_samesite=none` for cross-origin iframe |
+| `core-server/config/config-agent-gateway.yaml` | MCP `issuer` + `jwks.url` → `sso-atkdev`; `resourceMetadata.resource` → `https://backend-atkdev…/mcp` |
+| `core-server/config/.keycloak_env` | Added `KEYCLOAK_URL`, `KEYCLOAK_REDIRECTION_URL` |
+| `core-server/config/.vault_env` | `VAULT_URL=http://vault:8200` (container-to-container, no TLS hop) |
+| `frontend-server/config/app-config.json` | `backend.api.baseUrl` → `https://backend-atkdev…/api`; `auth.keycloak.url` → `https://sso-atkdev…/auth`; `clientId` → `aiot-frontend`; `externalLinks.*` → `https://backend-atkdev…/grafana`; `iframes.agentGateway` → `https://backend-atkdev…/ui/`; entraId redirect URIs → frontend DNS |
+| `frontend-server/config/config.json` | Same substitutions for the legacy endpoint map, incl. `iac_socket_url` → `wss://backend-atkdev…` |
+| `frontend-server/config/nginx.conf` | New: static SPA vhost with SPA fallback, asset caching, `no-store` on `app-config.json` |
+| `*/config/vite.config.ts` | `preview.allowedHosts` updated (only affects `vite preview`, not the production build) |
+
+**No application source code was modified.** Everything above is config.
+
+---
+
+## 3. Deploy
+
+### 3.1 Core server — 10.106.6.15
+
+```bash
+scp -r ATK-MultiHost/core-server  user@10.106.6.15:/opt/atk/
+ssh user@10.106.6.15
+cd /opt/atk/core-server
+
+# TLS — see ssl/README.md (cert must cover all three *-atkdev names)
+cp /path/to/fullchain.pem ssl/
+cp /path/to/privkey.pem   ssl/
+chmod 600 ssl/privkey.pem
+
+# Fill in every <YOUR_...> placeholder
+vi .env
+vi config/.keycloak_env config/.vault_env config/.itsm_env
+vi init/01_init.sh        # keycloak_db / litellm_db passwords must match .env
+vi config/litellm_config.yaml
+
+docker compose config          # validates .env interpolation
+docker compose up -d
+docker compose ps
+docker compose logs -f nginx
+```
+
+Open firewall: `80/tcp`, `443/tcp` (and `3978/tcp` only if MIM Assist is used).
+The container ports published for debugging (`5432`, `8080`, `8200`, `4000`,
+`3000`, `8000`, `13000`, `15000`, `19000`) should **not** be reachable from
+outside the VM — block them at the host firewall:
+
+```bash
+sudo firewall-cmd --permanent --add-port=80/tcp --add-port=443/tcp
+sudo firewall-cmd --reload
+```
+
+### 3.2 Frontend server — 10.106.6.228
+
+```bash
+scp -r ATK-MultiHost/frontend-server  user@10.106.6.228:/opt/atk/
+ssh user@10.106.6.228
+cd /opt/atk/frontend-server
+
+cp /path/to/fullchain.pem ssl/
+cp /path/to/privkey.pem   ssl/
+chmod 600 ssl/privkey.pem
+
+# Confirm the endpoints point at the core server
+grep -n "atkdev" config/app-config.json
+
+docker compose up -d
+docker compose logs -f frontend-builder   # wait for the vite build to finish
+docker compose ps                         # nginx starts only after the build exits 0
+```
+
+The frontend VM needs outbound HTTPS to `*-atkdev.familydollar.com` only for
+the *browser*, not for the server itself — nginx here serves static files and
+proxies nothing (unless you enable the optional block in §7).
+
+---
+
+## 4. Keycloak configuration (required — not file-driven)
+
+After the core stack is up, log into
+`https://sso-atkdev.familydollar.com/auth` with `KEYCLOAK_ADMIN` /
+`KEYCLOAK_ADMIN_PASSWORD` and configure realm `AIOT`:
+
+**Public client `aiot-frontend`** (must match `app-config.json → auth.keycloak.clientId`)
+
+| Setting | Value |
+|---|---|
+| Client authentication | Off (public) |
+| Standard flow | On |
+| Valid redirect URIs | `https://autonomousitopstoolkitdev.familydollar.com/*` |
+| Valid post logout redirect URIs | `https://autonomousitopstoolkitdev.familydollar.com/*` |
+| Web origins | `https://autonomousitopstoolkitdev.familydollar.com` |
+
+The **Web origins** entry is the one that bites in a split deployment: without
+it the browser's CORS preflight to `/token`, `/revoke` and `/userinfo` fails and
+login silently loops.
+
+**Confidential client `aiot-backend`** — client-credentials / service account,
+used for token introspection. Put its id + secret in
+`core-server/config/.keycloak_env` (`CLIENT_ID`, `CLIENT_SECRET`) and in `.env`
+(`SA_CLIENT_ID`, `SA_CLIENT_SECRET`).
+
+**Client `agw-cli`** — Agent Gateway UI; redirect URI
+`https://backend-atkdev.familydollar.com/ui/*`, web origin
+`https://backend-atkdev.familydollar.com`.
+
+Also add a **groups** mapper to the token (the backend and the Agent Gateway
+authorization rules read `jwt.groups`).
+
+---
+
+## 5. Verify
+
+```bash
+# From any host that can resolve the records
+curl -sI  https://sso-atkdev.familydollar.com/auth/realms/AIOT
+curl -s   https://sso-atkdev.familydollar.com/auth/realms/AIOT/.well-known/openid-configuration | head -c 200
+curl -sI  https://vault-atkdev.familydollar.com/v1/sys/health
+curl -s   https://backend-atkdev.familydollar.com/api/health/live
+curl -sI  https://backend-atkdev.familydollar.com/grafana/login
+curl -sI  https://autonomousitopstoolkitdev.familydollar.com/
+curl -s   https://autonomousitopstoolkitdev.familydollar.com/app-config.json | head -c 200
+
+# CORS preflight the SPA will issue
+curl -s -X OPTIONS https://backend-atkdev.familydollar.com/api/health/live \
+  -H "Origin: https://autonomousitopstoolkitdev.familydollar.com" \
+  -H "Access-Control-Request-Method: GET" -D - -o /dev/null
+```
+
+Validate nginx syntax before restarting either host:
+
+```bash
+docker compose exec nginx nginx -t
+docker compose exec nginx nginx -s reload     # config-only change, no downtime
+```
+
+---
+
+## 6. Changing an endpoint later
+
+`app-config.json` is loaded by the SPA **at runtime**, so editing it does not
+require a rebuild:
+
+```bash
+# on 10.106.6.228
+vi config/app-config.json
+docker compose restart frontend-builder   # re-copies public/ into the bundle
+docker compose exec nginx nginx -s reload
+```
+
+nginx serves `app-config.json` with `Cache-Control: no-store`, so a normal
+refresh picks up the change.
+
+---
+
+## 7. Fallback: single-origin mode
+
+If cross-origin turns out to be a problem (corporate proxy stripping `Origin`,
+a security policy that forbids `Access-Control-Allow-Origin: *`, …), switch the
+browser back to a single origin:
+
+1. In `frontend-server/config/nginx.conf`, uncomment the `location /api/`,
+   `/iac_assist_socket/`, `/grafana/` and `/ui/` blocks at the bottom.
+2. In `frontend-server/config/app-config.json`, revert to relative paths:
+   `backend.api.baseUrl` → `"/api"`, `externalLinks.*` → `"/grafana"`,
+   `iframes.agentGateway` → `"/ui/"`.
+3. In `frontend-server/config/config.json`, use `/api` and
+   `wss://autonomousitopstoolkitdev.familydollar.com/iac_assist_socket/ws/`.
+
+Keycloak stays on `sso-atkdev` either way — the JS adapter is designed for a
+separate SSO origin, it only needs the Web origins entry from §4.
+
+---
+
+## 8. Known rough edges carried over from `../ATK`
+
+- `main.py` hard-codes `allow_origins=["*"]`; the `CORS_ORIGINS` /
+  `ALLOWED_ORIGINS` env vars are set but not read. Left as-is — it is what makes
+  the split work without a code change. Tighten it in `main.py` if your security
+  review requires an explicit origin list.
+- The backend service mounts `config/vite.config.ts` to `/app/vite.config.ts`
+  (labelled "Hotfix: override main.py"). It is inert for a Python container;
+  kept for parity with the original compose file.
+- `init/01_init.sh` contains literal DB passwords that must be kept in sync with
+  `.env` by hand. It only runs on first boot of an empty `postgres_data` volume.
+- `litellm_config.yaml` carries a second copy of the LiteLLM DSN alongside
+  `DATABASE_URL` in compose.
+- `app-config.json → externalLinks.cloudAi` and the whole `fasteai` block point
+  at services that are not part of this stack; left untouched.

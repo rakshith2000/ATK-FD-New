@@ -1,0 +1,76 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ATK FRONTEND SERVER  —  10.106.6.228
+#  Hosts: Frontend builder + Nginx only.
+#
+#  DNS record served by this host's nginx:
+#    autonomousitopstoolkitdev.familydollar.com  ->  static React bundle
+#
+#  All API / SSO / Grafana traffic goes straight from the browser to the
+#  core server (10.106.6.15) using the hostnames configured in
+#  ./config/app-config.json.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ─── FRONTEND BUILD (runs once, writes the bundle into the shared volume) ──
+
+  frontend-builder:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:frontend_2.3.4
+    container_name: atk-frontend-builder
+    command: >
+      sh -c "
+      cp /app/public.pem /app/public.pem 2>/dev/null;
+      cd /app &&
+      npm run build &&
+      rm -rf /shared/* &&
+      cp -r dist/* /shared/
+      "
+    environment:
+      PORT: "80"
+      BROWSER: none
+      VITE_APP_PIPELINE_STAGE: production
+      VITE_APP_BASE_PATH: /
+      VITE_ENABLE_DOCS_PAGE: "false"
+      VITE_ENABLE_DEV_SPACE_PAGE: "false"
+      VITE_ENABLE_SITE_MAP_PAGE: "false"
+      VITE_INCLUDE_DEVTOOLS_IN_BUILD: "false"
+    volumes:
+      - ./config/app-config.json:/app/public/app-config.json:ro
+      - ./config/config.json:/app/public/config.json:ro
+      - ./config/public.pem:/app/public.pem:ro
+      - ./config/license.txt:/app/public/license.txt:ro
+      - ./config/vite.config.ts:/app/vite.config.ts:ro
+      - frontend_dist:/shared
+    networks:
+      - atk-network
+    restart: "no"
+
+  # ─── REVERSE PROXY / STATIC WEB SERVER ────────────────────────────────────
+
+  nginx:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:nginx_2.3.1
+    container_name: atk-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      frontend-builder:
+        condition: service_completed_successfully
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+# ─── NETWORKS ────────────────────────────────────────────────────────────────
+
+networks:
+  atk-network:
+    driver: bridge
+
+# ─── VOLUMES ─────────────────────────────────────────────────────────────────
+
+volumes:
+  frontend_dist:

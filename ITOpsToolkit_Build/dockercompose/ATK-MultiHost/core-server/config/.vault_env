@@ -1,0 +1,14 @@
+# Backend -> HashiCorp Vault.
+#
+# The backend container sits on the same docker network as vault, so it talks
+# to it directly over the container name. Keep it on http:// internally to
+# avoid a pointless TLS hop through nginx and self-signed-cert problems.
+#
+#   Internal (backend container):  http://vault:8200
+#   External (browser / operator): https://vault-atkdev.familydollar.com
+#
+# Use the external URL here only if the backend runs outside this compose stack.
+
+VAULT_URL=http://vault:8200
+ENGINE=<VAULT_ENGINE_NAME>
+VAULT_TOKEN=<YOUR_VAULT_TOKEN>

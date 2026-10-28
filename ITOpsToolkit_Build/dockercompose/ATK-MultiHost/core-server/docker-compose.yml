@@ -1,0 +1,296 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ATK CORE SERVER  —  10.106.6.15
+#  Hosts: Postgres, Vault, Keycloak, LiteLLM, Agent Gateway, Backend, Grafana, Nginx
+#
+#  DNS records served by this host's nginx:
+#    sso-atkdev.familydollar.com      -> keycloak
+#    vault-atkdev.familydollar.com    -> vault
+#    backend-atkdev.familydollar.com  -> backend (+ /grafana, /litellm, /ui, /mcp)
+#
+#  The Frontend is NOT deployed here — see ../frontend-server (10.106.6.228)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ─── INFRASTRUCTURE ────────────────────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: atk-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+    networks:
+      - atk-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  vault:
+    image: hashicorp/vault:latest
+    container_name: atk-vault
+    user: root
+    entrypoint: ["vault", "server", "-config=/vault/config/vault.hcl"]
+    ports:
+      - "8200:8200"
+    volumes:
+      - vault_data:/vault/data
+      - ./config/vault.hcl:/vault/config/vault.hcl:ro
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+  # ─── IDENTITY & ACCESS MANAGEMENT ──────────────────────────────────────────
+  # Published on its own DNS record: https://${KEYCLOAK_DNS}/auth
+
+  keycloak:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:keycloak_2.3.2
+    container_name: atk-keycloak
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: https://${KEYCLOAK_DNS}/auth
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASS}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - atk-network
+    restart: unless-stopped
+    command: start-dev
+
+  # ─── LLM PROXY ─────────────────────────────────────────────────────────────
+  # Published as a sub-path of the backend DNS: https://${BACKEND_DNS}/litellm
+
+  litellm:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:litellm_2.3.1
+    container_name: atk-litellm
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      UI_USERNAME: ${LITELLM_UI_USERNAME}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD}
+      STORE_MODEL_IN_DB: "true"
+      TRUST_PROXY_HEADERS: "true"
+      LITELLM_PUBLIC_BASE_URL: https://${BACKEND_DNS}/litellm
+      DATABASE_URL: postgresql://${LITELLM_DB_USER}:${LITELLM_DB_PASS}@postgres:5432/${LITELLM_DB}
+      SERVER_ROOT_PATH: /litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./config/litellm_config.yaml:/app/config.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - atk-network
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--detailed_debug"]
+
+  # ─── AGENT GATEWAY ─────────────────────────────────────────────────────────
+  # Published as sub-paths of the backend DNS:
+  #   UI      -> https://${BACKEND_DNS}/ui/
+  #   Engine  -> https://${BACKEND_DNS}/agentgateway/  and  /mcp
+
+  agentgateway-engine:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:agentgateway_engine_2.3.1
+    container_name: atk-agentgateway-engine
+    environment:
+      ADMIN_ADDR: "0.0.0.0:15000"
+    ports:
+      - "${AGENT_GATEWAY_PORT:-13000}:3000"
+      - "${AGENT_GATEWAY_ADMIN_PORT:-15000}:15000"
+      - "15021:15021"
+    volumes:
+      - ./config/config-agent-gateway.yaml:/config.yaml
+      - agentgateway_data:/data
+    depends_on:
+      keycloak:
+        condition: service_started
+    networks:
+      - atk-network
+    restart: unless-stopped
+    command: ["--file", "/config.yaml"]
+
+  agentgateway-ui:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:agentgateway_ui_2.3.1
+    container_name: atk-agentgateway-ui
+    environment:
+      ENGINE_ADMIN_UPSTREAM: agentgateway-engine:15000
+      KEYCLOAK_URL: https://${KEYCLOAK_DNS}/auth
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_AGW_CLIENT_ID:-agw-cli}
+    ports:
+      - "${AGENT_GATEWAY_UI_PORT:-19000}:19000"
+    depends_on:
+      agentgateway-engine:
+        condition: service_started
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+  # ─── BACKEND ───────────────────────────────────────────────────────────────
+  # Published on its own DNS record: https://${BACKEND_DNS}/api
+
+  backend:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:backend_2.3.2
+    container_name: atk-backend
+    environment:
+      PORT: "8000"
+      MIM_APP_PORT: "${MIM_APP_PORT:-3978}"
+      ENVIRONMENT: production
+      # Browser calls arrive cross-origin from the Frontend host (10.106.6.228)
+      CORS_ORIGINS: "https://${FRONTEND_DNS}"
+      ALLOWED_ORIGINS: "https://${FRONTEND_DNS}"
+      # Database
+      DB_HOST: ${DB_HOST}
+      DB_PORT: "${DB_PORT:-5432}"
+      DB_NAME: ${DB_NAME}
+      PGDB_HOST: ${PGDB_HOST}
+      PGDB_PORT: "${PGDB_PORT:-5432}"
+      PGDB_NAME: ${PGDB_NAME}
+      # Vector / similarity
+      VECTOR_DIM: "1536"
+      DUPLICATE_THRESHOLD: "0.9"
+      SIMILARITY_THRESHOLD: "0.7"
+      PASS_THRESHOLD: "0.7"
+      PROACTIVE_PROBLEM_ANALYSIS_DAYS: "${PROACTIVE_PROBLEM_ANALYSIS_DAYS:-30}"
+      # Agent Gateway (container-to-container, stays inside the docker network)
+      AGENT_GATEWAY_URL: http://agentgateway-engine:3000/agent-gateway
+      # ITSM
+      SNOW_URL: ${SNOW_URL}
+      INC_TIMELINE: "30"
+      KB_BASES: ${KB_BASES}
+      KB_FIELDS: ${KB_FIELDS}
+      # Keycloak — now on its own DNS record
+      KEYCLOAK_URL: https://${KEYCLOAK_DNS}/auth
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_REDIRECTION_URL: https://${FRONTEND_DNS}/
+      SA_CLIENT_ID: "${SA_CLIENT_ID}"
+      SA_CLIENT_SECRET: "${SA_CLIENT_SECRET}"
+      TWILIO_PHONE_NUMBER_FROM: "${TWILIO_PHONE_NUMBER_FROM}"
+      # LLM (populated via Vault at runtime)
+      MODEL: ""
+      BASE_URL: ""
+      API_TYPE: ""
+      AZ_API_VERSION: ""
+      API_VERSION: ""
+      PROXY: ""
+      SECRET_MANAGER_NAME: ""
+      SECRET_MANAGER_REGION: ""
+    ports:
+      - "8000:8000"
+      - "${MIM_APP_PORT:-3978}:${MIM_APP_PORT:-3978}"
+    volumes:
+      # Hotfix: override main.py
+      - ./config/vite.config.ts:/app/vite.config.ts:ro
+      # Vault credentials
+      - ./config/.vault_env:/app/config/.vault_env:ro
+      - ./config/.vault_type:/app/config/.vault_type:ro
+      # Keycloak client credentials
+      - ./config/.keycloak_env:/app/config/.keycloak_env:ro
+      # ITSM (ServiceNow) credentials
+      - ./config/.itsm_env:/app/config/.itsm_env:ro
+      # Per-module LLM system prompts
+      - ./system_prompts/change_assist.yaml:/app/modules/change_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/incident_assist.yaml:/app/modules/incident_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/knowledge_assist.yaml:/app/modules/knowledge_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/meeting_assist.yaml:/app/modules/meeting_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/problem_assist.yaml:/app/modules/problem_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/train_assist.yaml:/app/modules/train_assist/config/system_prompts.yaml:ro
+      - ./system_prompts/mim_assist.yaml:/app/modules/mim_assist/config/system_prompts.yaml:ro
+      # MIM Assist shift roster template
+      - ./config/shift_roaster.xlsx:/app/modules/mim_assist/config/shift_roaster.xlsx:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault:
+        condition: service_started
+      keycloak:
+        condition: service_started
+      agentgateway-engine:
+        condition: service_started
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+  # ─── OBSERVABILITY (ATK PULSE) ─────────────────────────────────────────────
+  # Published as a sub-path of the backend DNS: https://${BACKEND_DNS}/grafana
+
+  grafana:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:grafan_2.3.2
+    container_name: atk-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-Admin}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SERVER_ROOT_URL: https://${BACKEND_DNS}/grafana
+      # Allow the Frontend host to embed the dashboards
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SECURITY_COOKIE_SAMESITE: none
+      GF_SECURITY_COOKIE_SECURE: "true"
+    ports:
+      - "3000:3000"
+      - "5327:4317"   # OTLP gRPC
+      - "5328:4318"   # OTLP HTTP
+    volumes:
+      - grafana_data:/data
+      - ./config/grafana.ini:/etc/grafana/grafana.ini:ro
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+  # ─── REVERSE PROXY ─────────────────────────────────────────────────────────
+  # Name-based virtual hosting for the 3 DNS records that resolve to this VM.
+
+  nginx:
+    image: atkcontainerhub.jfrog.io/atk-main-2-3/atk-maf:nginx_2.3.1
+    container_name: atk-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - keycloak
+      - vault
+      - litellm
+      - agentgateway-engine
+      - agentgateway-ui
+      - grafana
+    networks:
+      - atk-network
+    restart: unless-stopped
+
+# ─── NETWORKS ────────────────────────────────────────────────────────────────
+
+networks:
+  atk-network:
+    driver: bridge
+
+# ─── VOLUMES ─────────────────────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  vault_data:
+  grafana_data:
+  agentgateway_data:

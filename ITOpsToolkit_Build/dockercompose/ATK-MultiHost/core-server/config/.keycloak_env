@@ -1,0 +1,13 @@
+# Backend -> Keycloak service-account client. Consumed by deployment_setup.py
+# and modules/auth/utils/auth_handler.py (token introspection).
+#
+# KEYCLOAK_URL and KEYCLOAK_REDIRECTION_URL are ALSO injected by
+# docker-compose.yml. Values already present in the container environment win
+# over this file (load_dotenv does not override), so keep both in sync.
+
+KEYCLOAK_URL=https://sso-atkdev.familydollar.com/auth
+KEYCLOAK_REDIRECTION_URL=https://autonomousitopstoolkitdev.familydollar.com/
+
+REALM_NAME=AIOT
+CLIENT_ID=<YOUR_KEYCLOAK_BACKEND_CLIENT_ID>
+CLIENT_SECRET=<YOUR_KEYCLOAK_BACKEND_CLIENT_SECRET>

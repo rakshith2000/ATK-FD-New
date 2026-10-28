@@ -1,0 +1,380 @@
+## Update The below details to create the debugging/sleepy pod from the base image/pod.Remove the blocks if its not applicable (approx. line number is also mentioned.)
+
+# Namespace name - namespace - 24
+# Node details - nodeSelector - 30
+# ServiceAccount details - serviceAccountName - 32
+# Image Pull Secrets (only if applicable) - imagePullSecrets - 35
+# Base Image Details (JFrog/ACR/ECR URL) inside 'initContainers' block - image - 45
+# Port Details (if modified) inside 'initContainers' and 'container' block - 138,261
+# Configmap Name for Environmental Variables (if modified) inside 'containers' block - 271
+# Configmap Name for Vault Variables (if modified) inside 'initContainers' and 'container' block - 167,288
+# Kubernetes Secret Name for Keycloak and ITSM (if modified) inside 'initContainers' and 'container' block - 180,297
+# Remove PVC block if the mentioned module is not part of the deployments - 195,311
+# PVC Name (if modified) - claimName - 382
+
+
+
+
+
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: backend-debug-pod
+  namespace: <Namespace-Name>
+
+spec:
+  restartPolicy: Never
+
+  nodeSelector:
+    <label-key>: <label-value>
+
+  serviceAccountName: <Service Account >
+
+  imagePullSecrets:
+    - name: <secret-name>
+
+  # ============================================================
+  # INIT CONTAINER
+  # Uses the REAL production image.
+
+  initContainers:
+
+    - name: snapshot-of-production
+
+      image: <Container Registry URL>:<Image Tag Name>
+      imagePullPolicy: Always
+
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+
+      command:
+        - python
+        - -c
+        - |
+          import os
+          import shutil
+
+          print("========================================")
+          print("Creating production /app snapshot")
+          print("========================================")
+
+          src = "/app"
+          dst = "/debug-app"
+
+          os.makedirs(dst, exist_ok=True)
+
+          shutil.copytree(
+              src,
+              dst,
+              dirs_exist_ok=True,
+              symlinks=True
+          )
+
+          print("Production /app snapshot completed.")
+
+          print("========================================")
+          print("Copying Python site-packages")
+          print("========================================")
+
+          src = "/usr/lib/python3.13/site-packages"
+          dst = "/debug-python/usr/lib/python3.13/site-packages"
+
+          if os.path.exists(src):
+              os.makedirs(dst, exist_ok=True)
+
+              shutil.copytree(
+                  src,
+                  dst,
+                  dirs_exist_ok=True,
+                  symlinks=True
+              )
+
+          print("Python packages copied.")
+
+          print("========================================")
+          print("Copying uvicorn")
+          print("========================================")
+
+          os.makedirs("/debug-python/usr/local/bin", exist_ok=True)
+
+          if os.path.exists("/usr/bin/uvicorn"):
+              shutil.copy2("/usr/bin/uvicorn", "/debug-python/usr/local/bin/uvicorn") 
+
+          print("uvicorn copied.")
+
+          print("========================================")
+          print("Copying NLTK data")
+          print("========================================")
+
+          src = "/usr/local/share/nltk_data"
+          dst = "/debug-python/usr/local/share/nltk_data"
+
+          if os.path.exists(src):
+              os.makedirs(
+                  "/debug-python/usr/local/share",
+                  exist_ok=True
+              )
+
+              shutil.copytree(
+                  src,
+                  dst,
+                  dirs_exist_ok=True,
+                  symlinks=True
+              )
+
+          print("NLTK data copied.")
+
+          print("========================================")
+          print("SNAPSHOT COMPLETE")
+          print("========================================")
+
+      env:
+        - name: PORT
+          value: "8000"
+
+        - name: ENVIRONMENT
+          value: production
+
+        - name: CORS_ORIGINS
+          value: "*"
+
+      envFrom:
+        - configMapRef:
+            name: itops-platform-itops-backend-config
+
+      volumeMounts:
+
+        # ------------------------------------------------------
+        # Destination for complete production /app
+        # ------------------------------------------------------
+
+        - name: debug-app
+          mountPath: /debug-app
+
+        # ------------------------------------------------------
+        # Destination for Python runtime files
+        # ------------------------------------------------------
+
+        - name: debug-python
+          mountPath: /debug-python
+
+        # ------------------------------------------------------
+        # SAME ConfigMaps as production
+        # ------------------------------------------------------
+
+        - name: vault-env
+          mountPath: /app/config/.vault_env
+          subPath: vault_env
+
+        - name: vault-type
+          mountPath: /app/config/.vault_type
+          subPath: vault_type
+
+        # ------------------------------------------------------
+        # SAME Secrets as production
+        # ------------------------------------------------------
+
+        - name: keycloak-secret-vol
+          mountPath: /app/config/.keycloak_env
+          subPath: .keycloak_env
+          readOnly: true
+
+        - name: itsm-secret-vol
+          mountPath: /app/config/.itsm_env
+          subPath: .itsm_env
+          readOnly: true
+
+        # ------------------------------------------------------
+        # SAME PVC FILES as production
+        # ------------------------------------------------------
+
+        - name: shared-storage
+          mountPath: /app/modules/change_assist/config/system_prompts.yaml
+          subPath: change_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/incident_assist/config/system_prompts.yaml
+          subPath: incident_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/knowledge_assist/config/system_prompts.yaml
+          subPath: knowledge_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/meeting_assist/config/system_prompts.yaml
+          subPath: meeting_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/problem_assist/config/system_prompts.yaml
+          subPath: problem_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/train_assist/config/system_prompts.yaml
+          subPath: train_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/mim_assist/config/system_prompts.yaml
+          subPath: mim_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/mim_assist/config/shift_roaster.xlsx
+          subPath: mim_assist_shift_roaster.xlsx
+          readOnly: true
+
+
+  # DEBUG CONTAINER
+  containers:
+
+    - name: debugger-sleepy-pod
+      # Generic debug image only. No application code is stored in this image.
+      # Application code/runtime are copied from the production image above.
+      image: python:3.13-slim
+      imagePullPolicy: IfNotPresent
+
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+
+      command:
+        - /bin/sh
+        - -c
+        - sleep 3600
+
+      env:
+        - name: PORT
+          value: "8000"
+
+        - name: ENVIRONMENT
+          value: production
+
+        - name: CORS_ORIGINS
+          value: "*"
+
+      envFrom:
+        - configMapRef:
+            name: itops-platform-itops-backend-config
+
+      volumeMounts:
+
+        # SNAPSHOT OF PRODUCTION /app
+        - name: debug-app
+          mountPath: /app
+
+        # SNAPSHOT OF PRODUCTION PYTHON PACKAGES
+        - name: debug-python
+          mountPath: /usr/local/lib/python3.13/site-packages
+          subPath: usr/lib/python3.13/site-packages
+
+        # UVICORN
+        - name: debug-python
+          mountPath: /usr/local/bin/uvicorn
+          subPath: usr/local/bin/uvicorn
+
+        # NLTK
+        - name: debug-python
+          mountPath: /usr/local/share/nltk_data
+          subPath: usr/local/share/nltk_data
+
+        # SAME ConfigMaps - READ ONLY
+        - name: vault-env
+          mountPath: /app/config/.vault_env
+          subPath: vault_env
+
+        - name: vault-type
+          mountPath: /app/config/.vault_type
+          subPath: vault_type
+
+        # SAME Secrets - READ ONLY
+        - name: keycloak-secret-vol
+          mountPath: /app/config/.keycloak_env
+          subPath: .keycloak_env
+          readOnly: true
+
+        - name: itsm-secret-vol
+          mountPath: /app/config/.itsm_env
+          subPath: .itsm_env
+          readOnly: true
+
+        # Uses the existing production PVC in READ-ONLY mode.
+        # Changes to PVC-backed files are NOT allowed from this debug Pod.
+        - name: shared-storage
+          mountPath: /app/modules/change_assist/config/system_prompts.yaml
+          subPath: change_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/incident_assist/config/system_prompts.yaml
+          subPath: incident_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/knowledge_assist/config/system_prompts.yaml
+          subPath: knowledge_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/meeting_assist/config/system_prompts.yaml
+          subPath: meeting_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/problem_assist/config/system_prompts.yaml
+          subPath: problem_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/train_assist/config/system_prompts.yaml
+          subPath: train_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/mim_assist/config/system_prompts.yaml
+          subPath: mim_assist_system_prompts.yaml
+          readOnly: true
+
+        - name: shared-storage
+          mountPath: /app/modules/mim_assist/config/shift_roaster.xlsx
+          subPath: mim_assist_shift_roaster.xlsx
+          readOnly: true
+
+  # VOLUMES
+  volumes:
+
+    # Temporary snapshot of production /app
+    - name: debug-app
+      emptyDir: {}
+
+    # Temporary snapshot of Python runtime
+    - name: debug-python
+      emptyDir: {}
+
+    # SAME production ConfigMaps
+    - name: vault-env
+      configMap:
+        name: vault-env
+
+    - name: vault-type
+      configMap:
+        name: vault-type
+
+    # SAME production Secrets
+    - name: keycloak-secret-vol
+      secret:
+        secretName: keycloak-secret
+    - name: itsm-secret-vol
+      secret:
+        secretName: itsm-secret
+
+    # SAME production PVC
+    - name: shared-storage
+      persistentVolumeClaim:
+        claimName: itops-platform-itops-backend-pvc

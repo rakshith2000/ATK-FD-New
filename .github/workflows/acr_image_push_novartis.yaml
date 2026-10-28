@@ -1,0 +1,143 @@
+name: ACR_Parameterised Novartis
+
+# on:
+#    push:
+#      branches:
+#        - main2.2
+
+on:
+  workflow_dispatch:
+
+env:
+  ACR_NAME: itopsnovartis2
+  ACR_LOGIN_SERVER: itopsnovartis2.azurecr.io
+
+  KEYCLOAK_TAG: ${{ github.event.inputs.keycloak_tag || 'keycloak_2.2.1' }}
+  KEYCLOAK_PATH: './ITOpsToolkit_Keycloak'
+  BUILD_KEYCLOAK: ${{ github.event.inputs.build_keycloak || 'true' }}
+
+  BACKEND_TAG: ${{ github.event.inputs.backend_tag || 'backend_2.2.1' }}
+  BACKEND_PATH: './ITOpsToolkit_Backend'
+  BUILD_BACKEND: ${{ github.event.inputs.build_backend || 'true' }}
+
+  FRONTEND_TAG: ${{ github.event.inputs.frontend_tag || 'frontend_2.2.1' }}
+  FRONTEND_PATH: './ITOpsToolkit_Frontend'
+  BUILD_FRONTEND: ${{ github.event.inputs.build_frontend || 'true' }}
+
+  NGINX_TAG: ${{ github.event.inputs.nginx_tag || 'nginx_2.2.1' }}
+  NGINX_PATH: './ITOpsToolkit_Nginx'
+  BUILD_NGINX: ${{ github.event.inputs.build_nginx || 'true' }}
+
+  LITE_LLM_TAG: ${{ github.event.inputs.lite_llm_tag || 'litellm_2.2.1' }}
+  LITE_LLM_PATH: './ITOpsToolkit_LiteLLM'
+  BUILD_LITE_LLM: ${{ github.event.inputs.build_lite_llm || 'true' }}
+
+  GRAFANA_TAG: ${{ github.event.inputs.grafana_tag || 'grafana_2.2.1' }}
+  GRAFANA_PATH: './ITOpsToolkit_Grafana'
+  BUILD_GRAFANA: ${{ github.event.inputs.build_grafana || 'true' }}
+
+  AGENTGATEWAY_ENGINE_TAG: ${{ github.event.inputs.agentgateway_engine_tag || 'agentgateway_engine_2.2.1' }}
+  AGENTGATEWAY_ENGINE_PATH: './ITOpsToolkit_Agent_Gateway/agentgateway-engine'
+  BUILD_AGENTGATEWAY_ENGINE: ${{ github.event.inputs.build_agentgateway_engine || 'true' }}
+
+  AGENTGATEWAY_UI_TAG: ${{ github.event.inputs.agentgateway_ui_tag || 'agentgateway_ui_2.2.1' }}
+  AGENTGATEWAY_UI_PATH: './ITOpsToolkit_Agent_Gateway/agentgateway-ui'
+  BUILD_AGENTGATEWAY_UI: ${{ github.event.inputs.build_agentgateway_ui || 'true' }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Repository Structure
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 3 -type d | sort
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Free disk space
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af --volumes
+          docker builder prune -af
+          df -h
+
+      - name: Build and push Keycloak image
+        if: env.BUILD_KEYCLOAK == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-keycloak:${{ env.KEYCLOAK_TAG }} \
+            ${{ env.KEYCLOAK_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-keycloak:${{ env.KEYCLOAK_TAG }}
+
+      - name: Build and push Backend image
+        if: env.BUILD_BACKEND == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-backend:${{ env.BACKEND_TAG }} \
+            ${{ env.BACKEND_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-backend:${{ env.BACKEND_TAG }}
+
+      - name: Build and push Frontend image
+        if: env.BUILD_FRONTEND == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-frontend:${{ env.FRONTEND_TAG }} \
+            ${{ env.FRONTEND_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-frontend:${{ env.FRONTEND_TAG }}
+
+      - name: Build and push Nginx image
+        if: env.BUILD_NGINX == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-nginx:${{ env.NGINX_TAG }} \
+            ${{ env.NGINX_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-nginx:${{ env.NGINX_TAG }}
+
+      - name: Build and push LiteLLM image
+        if: env.BUILD_LITE_LLM == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-litellm:${{ env.LITE_LLM_TAG }} \
+            ${{ env.LITE_LLM_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-litellm:${{ env.LITE_LLM_TAG }}
+
+      - name: Build and push Grafana image
+        if: env.BUILD_GRAFANA == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-grafana:${{ env.GRAFANA_TAG }} \
+            ${{ env.GRAFANA_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-grafana:${{ env.GRAFANA_TAG }}
+
+      - name: Build and push AgentGateway Engine image
+        if: env.BUILD_AGENTGATEWAY_ENGINE == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-agentgateway-engine:${{ env.AGENTGATEWAY_ENGINE_TAG }} \
+            ${{ env.AGENTGATEWAY_ENGINE_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-agentgateway-engine:${{ env.AGENTGATEWAY_ENGINE_TAG }}
+
+      - name: Build and push AgentGateway UI image
+        if: env.BUILD_AGENTGATEWAY_UI == 'true'
+        run: |
+          docker build --no-cache --pull \
+            -t ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-agentgateway-ui:${{ env.AGENTGATEWAY_UI_TAG }} \
+            ${{ env.AGENTGATEWAY_UI_PATH }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/novartis-itops-agentgateway-ui:${{ env.AGENTGATEWAY_UI_TAG }}

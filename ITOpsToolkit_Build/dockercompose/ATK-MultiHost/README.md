@@ -132,6 +132,16 @@ vi config/.keycloak_env config/.vault_env config/.itsm_env
 vi init/01_init.sh        # keycloak_db / litellm_db passwords must match .env
 vi config/litellm_config.yaml
 
+# REQUIRED: the backend image runs as USER 65532:65532 and rewrites several of
+# these files in place from the Admin portal. Files left owned by root are
+# readable but not writable by the container, which surfaces as
+# "[Errno 13] Permission denied" when saving. See §9.
+sudo chown -R 65532:65532 system_prompts config
+sudo chmod 644 system_prompts/*.yaml config/.vault_env config/.vault_type \
+               config/shift_roaster.xlsx
+# SELinux hosts (RHEL/Rocky) only — append :z to each bind mount in
+# docker-compose.yml, or run: sudo setenforce 0 to confirm it is the cause.
+
 docker compose config          # validates .env interpolation
 docker compose up -d
 docker compose ps
@@ -306,6 +316,35 @@ docker compose exec nginx nginx -t          # syntax + upstream resolution
 docker compose ps                            # is agentgateway-ui actually up?
 curl -ski https://localhost/healthz -H "Host: backend-atkdev.familydollar.com"
 ```
+
+---
+
+## 9. Config files the application writes at runtime
+
+Most of `config/` is input-only, but three Admin-portal features rewrite their
+backing file **in place**, so those bind mounts must not be `:ro` and the host
+file must be owned by UID 65532 (the backend image's `USER`):
+
+| Host file | Written by | Code |
+|---|---|---|
+| `system_prompts/*.yaml` (all 7) | Admin → Prompt Library → Update Package Configuration / Update Agent Definition | `administration_router.py:714`, `:787` |
+| `config/.vault_env`, `config/.vault_type` | Admin → Vault → upload vault config | `vault.py:37`, `:41` |
+| `config/shift_roaster.xlsx` | MIM Assist → upload shift roster | `mim_assist_utils.py` |
+
+Both failure modes report through the same handler, whose message says
+*"Global configurations retrieval failed"* even though the **read succeeded and
+the write is what failed** — the whole read-modify-write sits in one `try`
+block with a hardcoded label. Read the errno, not the sentence:
+
+| errno | Cause | Fix |
+|---|---|---|
+| `[Errno 13] Permission denied` | host file owned by root; container is UID 65532 | `sudo chown 65532:65532 <file>` |
+| `[Errno 30] Read-only file system` | mount still has `:ro` | drop the `:ro` suffix |
+| `[Errno 13]` on **every** file incl. reads | SELinux denying the bind mount | append `:z` to the mount |
+
+Because the writes are in-place truncate-and-rewrite (`open(path, "w+")`, not
+atomic rename), single-file bind mounts work correctly and edits made in the UI
+persist to the host across container restarts.
 
 ---
 

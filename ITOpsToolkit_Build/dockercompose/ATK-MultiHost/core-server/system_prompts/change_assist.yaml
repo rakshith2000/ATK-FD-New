@@ -121,6 +121,6 @@ prompts:
     llm_tag: azure_gpt4o
   test_agent:
     description: Test Agent
-    instructions: |-
+    instruction: |-
       Test
       Instruction

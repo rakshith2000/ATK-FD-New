@@ -198,26 +198,53 @@ services:
     ports:
       - "8000:8000"
       - "${MIM_APP_PORT:-3978}:${MIM_APP_PORT:-3978}"
+    # IMPORTANT — mount modes below are deliberate, do not blanket-:ro them.
+    #
+    # The backend image runs as USER 65532:65532 (see ITOpsToolkit_Backend/
+    # Dockerfile). Several Admin-portal features REWRITE these files in place
+    # at runtime, so the corresponding host files must be both writable by the
+    # mount (no :ro) AND owned by 65532. Before the first `up`, run:
+    #
+    #     sudo chown -R 65532:65532 system_prompts config
+    #     sudo chmod 644 system_prompts/*.yaml config/.vault_env \
+    #                    config/.vault_type config/shift_roaster.xlsx
+    #
+    # On RHEL/Rocky with SELinux enforcing, append `:z` to each bind mount.
     volumes:
-      # Hotfix: override main.py
+      # Hotfix: override main.py  (inert for a Python container; kept for
+      # parity with ../../ATK/docker-compose.yml)
       - ./config/vite.config.ts:/app/vite.config.ts:ro
-      # Vault credentials
-      - ./config/.vault_env:/app/config/.vault_env:ro
-      - ./config/.vault_type:/app/config/.vault_type:ro
+
+      # ── WRITTEN AT RUNTIME — must stay read-write ──────────────────────
+      # Admin -> Vault "upload vault config" rewrites both of these
+      # (ITOpsToolkit_Backend/vault.py: upload_vault_config)
+      - ./config/.vault_env:/app/config/.vault_env
+      - ./config/.vault_type:/app/config/.vault_type
+
+      # Admin -> Prompt Library "Update Package Configuration" and
+      # "Update Agent Definition" rewrite these with open(path, "w+")
+      # (administration_router.py:714 and :787). Mounting them :ro makes the
+      # save fail with "Global configurations retrieval failed - [Errno 30]
+      # Read-only file system"; leaving them owned by root makes it fail with
+      # "[Errno 13] Permission denied". The error text says "retrieval" but
+      # the read succeeded - it is the write that fails.
+      - ./system_prompts/change_assist.yaml:/app/modules/change_assist/config/system_prompts.yaml
+      - ./system_prompts/incident_assist.yaml:/app/modules/incident_assist/config/system_prompts.yaml
+      - ./system_prompts/knowledge_assist.yaml:/app/modules/knowledge_assist/config/system_prompts.yaml
+      - ./system_prompts/meeting_assist.yaml:/app/modules/meeting_assist/config/system_prompts.yaml
+      - ./system_prompts/problem_assist.yaml:/app/modules/problem_assist/config/system_prompts.yaml
+      - ./system_prompts/train_assist.yaml:/app/modules/train_assist/config/system_prompts.yaml
+      - ./system_prompts/mim_assist.yaml:/app/modules/mim_assist/config/system_prompts.yaml
+
+      # MIM Assist shift roster — replaced in place by the upload endpoint
+      # (mim_assist_utils.py: "actual" roster that gets replaced on upload)
+      - ./config/shift_roaster.xlsx:/app/modules/mim_assist/config/shift_roaster.xlsx
+
+      # ── READ-ONLY — never written by the application ───────────────────
       # Keycloak client credentials
       - ./config/.keycloak_env:/app/config/.keycloak_env:ro
       # ITSM (ServiceNow) credentials
       - ./config/.itsm_env:/app/config/.itsm_env:ro
-      # Per-module LLM system prompts
-      - ./system_prompts/change_assist.yaml:/app/modules/change_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/incident_assist.yaml:/app/modules/incident_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/knowledge_assist.yaml:/app/modules/knowledge_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/meeting_assist.yaml:/app/modules/meeting_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/problem_assist.yaml:/app/modules/problem_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/train_assist.yaml:/app/modules/train_assist/config/system_prompts.yaml:ro
-      - ./system_prompts/mim_assist.yaml:/app/modules/mim_assist/config/system_prompts.yaml:ro
-      # MIM Assist shift roster template
-      - ./config/shift_roaster.xlsx:/app/modules/mim_assist/config/shift_roaster.xlsx:ro
     depends_on:
       postgres:
         condition: service_healthy

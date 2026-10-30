@@ -123,7 +123,9 @@
             "realm": "AIOT",
             "clientId": "aiot-frontend",
             "identityProvider": "keycloak",
-            "identityProviderAlias": ""
+            "identityProviderAlias": "",
+            "redirectUri": "https://autonomousitopstoolkitdev.familydollar.com/",
+            "postLogoutRedirectUri": "https://autonomousitopstoolkitdev.familydollar.com/"
         },
         "entraId": {
             "clientId": "a69f0055-f9c3-4661-a27a-1e877bd9caa0",
